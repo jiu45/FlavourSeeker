@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+venv/
+.venv/
+env/
+
+# Data
+data/
+lancedb/
+*.csv
+Food Images/
+
+# IDE
+.vscode/
+.idea/
+
+# System
+Thumbs.db
+Desktop.ini

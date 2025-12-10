@@ -1,0 +1,7 @@
+streamlit
+lancedb
+pandas
+sentence-transformers
+transformers
+torch
+pillow
