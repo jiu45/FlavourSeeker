@@ -1,21 +1,36 @@
 # 🧭 FlavourSeeker (Culinary Compass)
 
-**FlavourSeeker** is a multimodal AI-powered recipe search engine. It helps you find the perfect dish using text descriptions, food images, or by checking what's in your pantry.
+**FlavourSeeker** is a multimodal AI-powered recipe search engine. It helps you find the perfect dish using text descriptions, food images, or by checking what's in your pantry. Now enhanced with LLM-generated visual descriptions and smart tags for improved search relevance.
 
 ## 🌟 Features
 
-*   **Search by Name**: Find recipes by title or description using semantic search (MiniLM).
-*   **Visual Search**: Upload a photo of a dish to find visually similar recipes (OpenAI CLIP).
-*   **Pantry Search (Smart)**:
-    *   **Strict Mode**: Find recipes you can make *right now* with your current ingredients.
-    *   **Flexible Mode**: Find recipes you can *partially* make, prioritizing the ones closest to completion.
-*   **AI Chat**: Chat with a "Recipe Bot" to get tips or substitutions (placeholder).
+- **Search by Name**: Find recipes by title or description using semantic search (MiniLM).
+- **Visual Search**: Upload a photo of a dish to find visually similar recipes (OpenAI CLIP).
+- **Pantry Search (Smart)**:
+  - **Strict Mode**: Find recipes you can make *right now* with your current ingredients.
+  - **Flexible Mode**: Find recipes you can *partially* make, prioritizing the ones closest to completion.
+- **AI Chat**: Chat with the "Culinary Compass AI" to get recipe recommendations with natural language queries (powered by Groq Llama).
+- **LLM Enrichment**: Recipes are enriched with AI-generated visual descriptions and tags (cuisine, diet, course, vibe) for better search results.
+
+## 📁 Project Structure
+
+```
+FlavourSeeker/
+├── app.py              # Streamlit frontend
+├── search_engine.py    # Search logic (text, image, pantry)
+├── agent.py            # AI Chat agent (Groq Llama)
+├── ingest.py           # Phase 1: Data ingestion & embedding
+├── enrich_recipes.py   # Phase 2: Resumable LLM enrichment
+├── llm_enrichment.py   # Groq Vision API integration
+├── requirements.txt    # Python dependencies
+└── run_app.bat         # Windows launcher
+```
 
 ## 🛠️ Setup
 
 ### 1. Prerequisites
-*   Python 3.10+
-*   Git
+- Python 3.10+
+- Git
 
 ### 2. Installation
 Clone the repository and install dependencies:
@@ -27,19 +42,31 @@ pip install -r requirements.txt
 ```
 
 ### 3. Data Preparation
-You need to place your dataset in the root directory:
-1.  **CSV File**: `Food Ingredients and Recipe Dataset with Image Name Mapping.csv`
-2.  **Images Folder**: `Food Images/` (containing recipe JPG/PNG files)
+Place your dataset in the root directory:
+1. **CSV File**: `Food Ingredients and Recipe Dataset with Image Name Mapping.csv`
+2. **Images Folder**: `Food Images/` (containing recipe JPG/PNG files)
 
-*(Note: The repository contains a mock script to generate dummy data if you don't have the full dataset yet.)*
+## 🔄 Two-Phase Ingestion Pipeline
 
-### 4. Database Ingestion
-Before running the app, you must process the data and build the Vector Database (LanceDB).
-
+### Phase 1: Local Embeddings (Fast, Free)
 ```bash
 python ingest.py
 ```
-*Note: This may take a few minutes on the first run to download the AI models.*
+- Reads CSV and cleans data
+- Generates text embeddings (MiniLM)
+- Generates image embeddings (CLIP)
+- Saves to LanceDB
+
+### Phase 2: LLM Enrichment (Resumable, API)
+```bash
+python enrich_recipes.py           # Enrich all remaining
+python enrich_recipes.py --limit 50  # Enrich 50 at a time
+python enrich_recipes.py --status    # Check progress
+```
+- Uses Groq's Llama 4 Scout Vision API
+- Generates `visual_description` and `tags` for each recipe
+- **Resumable**: Run multiple times to complete large datasets
+- Progress is saved after each recipe
 
 ## 🚀 Running the App
 
@@ -49,12 +76,33 @@ Start the Streamlit interface:
 streamlit run app.py
 ```
 
-Or on Windows, simply double-click:
-`run_app.bat`
+Or on Windows, double-click: `run_app.bat`
 
 ## 🧠 Technologies
-*   **Frontend**: Streamlit
-*   **Vector DB**: LanceDB
-*   **Embeddings**:
-    *   Text: `all-MiniLM-L6-v2`
-    *   Image: `openai/clip-vit-base-patch32`
+
+| Component | Technology |
+|-----------|------------|
+| Frontend | Streamlit |
+| Vector DB | LanceDB |
+| Text Embeddings | `all-MiniLM-L6-v2` |
+| Image Embeddings | `openai/clip-vit-base-patch32` |
+| AI Chat | Groq API (Llama 3.3 70B) |
+| Vision Enrichment | Groq API (Llama 4 Scout) |
+
+## 📊 Database Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | int | Unique recipe ID |
+| `title` | str | Recipe name |
+| `ingredients` | str | List of ingredients |
+| `instructions` | str | Cooking instructions |
+| `image_name` | str | Image filename |
+| `visual_description` | str | AI-generated appearance description |
+| `tags` | list[str] | AI-generated tags (cuisine, diet, course, vibe) |
+| `text_vector` | vector | Text embedding (384 dims) |
+| `image_vector` | vector | Image embedding (512 dims) |
+
+## 📝 License
+
+MIT License

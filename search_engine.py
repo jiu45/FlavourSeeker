@@ -16,17 +16,18 @@ class RecipeSearchEngine:
         self.table = self.db.open_table(TABLE_NAME)
         
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # Load models - in production, might want to load these once or serve them separately
-        self.text_model = SentenceTransformer('all-MiniLM-L6-v2', device=self.device)
+        # clip_model is still needed for image search since we don't use registry for it yet
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
         self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-    def search_by_text(self, query, top_k=5):
-        query_vector = self.text_model.encode(query).tolist()
-        results = self.table.search(query_vector, vector_column_name="text_vector") \
-            .limit(top_k) \
-            .to_pandas()
-        return results
+    def search_by_text(self, query, top_k=5, where=None):
+        # Hybrid Search: FTS + Vector
+        search_builder = self.table.search(query, query_type="hybrid", vector_column_name="text_vector").limit(top_k)
+        
+        if where:
+            search_builder = search_builder.where(where)
+            
+        return search_builder.to_pandas()
 
     def search_by_image(self, image_file, top_k=5):
         image = Image.open(image_file)

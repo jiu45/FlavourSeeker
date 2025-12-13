@@ -9,15 +9,15 @@ IMAGES_DIR = "Food Images"
 
 # --- Initialization ---
 @st.cache_resource
-def get_search_engine():
+def get_search_engine_v3():
     # Force cache reload after logic update
     return RecipeSearchEngine()
 
-engine = get_search_engine()
+engine = get_search_engine_v3()
 
 # --- UI Layout ---
 st.sidebar.title("Culinary Compass 🧭")
-search_mode = st.sidebar.radio("Search Mode", ["Search by Name", "Search by Image", "What's in my Fridge?"])
+search_mode = st.sidebar.radio("Search Mode", ["Search by Name", "Search by Image", "What's in my Fridge?", "AI Smart Search 🤖"])
 
 st.title("Culinary Compass 🧭")
 st.markdown("### Find your next delicious meal!")
@@ -156,3 +156,34 @@ if 'active_recipe' not in st.session_state: # Only show search if not chatting
                             st.rerun()
             else:
                  st.info("No recipes found. Try adding more ingredients or switching to Flexible mode.")
+
+    elif search_mode == "AI Smart Search 🤖":
+        st.header("Culinary Compass AI 🤖")
+        st.markdown("*Ask me anything! I can find recipes, plan meals, or handle complex constraints like 'no beef'.*")
+
+        if "agent_history" not in st.session_state:
+            st.session_state.agent_history = []
+
+        # Display history
+        for msg in st.session_state.agent_history:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # Input
+        if prompt := st.chat_input("How can I help you today?"):
+            st.session_state.agent_history.append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            with st.spinner("Thinking..."):
+                try:
+                    # Import here to avoid circular dependencies if any
+                    from agent import chat_with_agent
+                    
+                    response_text = chat_with_agent(prompt, st.session_state.agent_history)
+                    
+                    st.session_state.agent_history.append({"role": "assistant", "content": response_text})
+                    with st.chat_message("assistant"):
+                        st.markdown(response_text)
+                except Exception as e:
+                    st.error(f"Agent Error: {e}")
