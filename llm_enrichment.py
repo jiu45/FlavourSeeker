@@ -14,7 +14,12 @@ import base64
 import time
 from groq import Groq
 
-# --- Configuration ---\n# Set GROQ_API_KEY environment variable before running\nGROQ_API_KEY = os.environ.get(\"GROQ_API_KEY\")
+
+from dotenv import load_dotenv
+
+load_dotenv()
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+# --- Configuration ---
 MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"  # Replaces deprecated Llama 3.2 Vision
 IMAGES_DIR = "Food Images"
 
@@ -184,7 +189,11 @@ def batch_enrich_recipes(recipes: list[dict], images_dir: str = IMAGES_DIR) -> l
     print(f"   Delay between batches: {DELAY_BETWEEN_BATCHES}s\n")
     
     for i, recipe in enumerate(recipes):
-        image_path = os.path.join(images_dir, recipe.get("image_name", ""))
+        image_name = recipe.get("image_name", "")
+        if not image_name.lower().endswith(".jpg"):
+            image_name += ".jpg"
+
+        image_path = os.path.join(images_dir, image_name)
         
         print(f"[{i+1}/{total}] Processing: {recipe.get('title', 'Unknown')[:50]}...")
         

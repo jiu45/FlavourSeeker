@@ -34,6 +34,8 @@ def display_results(results_df):
         with cols[i % 3]:
             # Load image
             image_name = row['image_name']
+            if not image_name.lower().endswith(".jpg"):
+                image_name += ".jpg"
             image_path = os.path.join(IMAGES_DIR, image_name)
             
             if os.path.exists(image_path):
@@ -127,6 +129,9 @@ if 'active_recipe' not in st.session_state: # Only show search if not chatting
                     with cols[i % 3]:
                         # Load image
                         image_name = row['image_name']
+                        if not image_name.lower().endswith(".jpg"):
+                            image_name += ".jpg"
+
                         image_path = os.path.join(IMAGES_DIR, image_name)
                         if os.path.exists(image_path):
                             image = Image.open(image_path)

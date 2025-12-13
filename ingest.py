@@ -43,10 +43,13 @@ class Recipe(LanceModel):
     image_vector: Vector(512)
 
 def get_image_embedding(image_name):
+    if not image_name.lower().endswith(".jpg"):
+        image_name = f"{image_name}.jpg"
+
     image_path = os.path.join(IMAGES_DIR, image_name)
     if not os.path.exists(image_path):
-        # Gracefully handle missing images
-        return [0.0] * 512 
+        return [0.0] * 512
+
     
     try:
         image = Image.open(image_path)
