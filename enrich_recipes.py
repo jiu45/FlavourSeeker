@@ -14,6 +14,10 @@ especially when dealing with API rate limits.
 
 import argparse
 import lancedb
+from dotenv import load_dotenv
+
+load_dotenv()  # Load .env before importing modules that need API keys
+
 from llm_enrichment import batch_enrich_recipes
 
 # --- Configuration ---
@@ -47,13 +51,14 @@ def get_unenriched_recipes(limit: int = None) -> list[dict]:
     if limit:
         unenriched = unenriched.head(limit)
     
-    # Convert to list of dicts
+    # Convert to list of dicts - include ALL fields needed for search_text rebuild
     recipes = []
     for _, row in unenriched.iterrows():
         recipes.append({
             "id": int(row['id']),
             "title": row['title'],
             "ingredients": row['ingredients'],
+            "instructions": row['instructions'],  # Needed for search_text rebuild
             "image_name": row['image_name']
         })
     
@@ -64,21 +69,37 @@ def update_enriched_recipes(enriched_recipes: list[dict]):
     """
     Update the database with enriched data.
     
+    IMPORTANT: Also rebuilds search_text to include visual_description and tags
+    so they contribute to semantic search.
+    
     Args:
-        enriched_recipes: List of recipe dicts with visual_description and tags
+        enriched_recipes: List of recipe dicts with visual_description, tags,
+                         and original fields (title, ingredients, instructions)
     """
     db = lancedb.connect(DB_PATH)
     tbl = db.open_table(TABLE_NAME)
     
-    print(f"\n[DB] Updating {len(enriched_recipes)} records...")
+    print(f"\n[DB] Updating {len(enriched_recipes)} records with enrichment data...")
+    print("     (Including visual_description and tags in search_text)")
     
     for i, enriched in enumerate(enriched_recipes):
         try:
+            # Build the new search_text with ALL searchable fields
+            # Original: title + ingredients + instructions
+            # New: + visual_description + tags (joined as space-separated string)
+            visual_desc = enriched.get("visual_description", "")
+            tags = enriched.get("tags", [])
+            tags_str = " ".join(tags) if isinstance(tags, list) else ""
+            
+            # Rebuild search_text with enrichment
+            new_search_text = f"{enriched['title']} {enriched['ingredients']} {enriched.get('instructions', '')} {visual_desc} {tags_str}"
+            
             tbl.update(
                 where=f"id = {enriched['id']}",
                 values={
-                    "visual_description": enriched.get("visual_description", ""),
-                    "tags": enriched.get("tags", [])
+                    "visual_description": visual_desc,
+                    "tags": tags,
+                    "search_text": new_search_text
                 }
             )
         except Exception as e:

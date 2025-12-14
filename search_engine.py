@@ -20,14 +20,42 @@ class RecipeSearchEngine:
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
         self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
-    def search_by_text(self, query, top_k=5, where=None):
-        # Hybrid Search: FTS + Vector
-        search_builder = self.table.search(query, query_type="hybrid", vector_column_name="text_vector").limit(top_k)
+    def search_by_text(self, query, top_k=5, where=None, min_score=None):
+        """
+        Hybrid Search: FTS + Vector with optional relevance filtering.
+        
+        Args:
+            query: Search query string
+            top_k: Maximum number of results to return
+            where: SQL-like filter condition
+            min_score: Minimum relevance score. Results with _relevance_score < this will be discarded.
+                      For hybrid search, typical values: -5 (strict), -10 (moderate), -15 (loose)
+                      Note: Scores are negative in LanceDB hybrid search (less negative = more relevant)
+        
+        Returns:
+            pandas DataFrame with search results
+        """
+        # Fetch more results initially to account for score filtering
+        fetch_limit = top_k * 3 if min_score else top_k
+        
+        search_builder = self.table.search(query, query_type="hybrid", vector_column_name="text_vector").limit(fetch_limit)
         
         if where:
             search_builder = search_builder.where(where)
+        
+        results = search_builder.to_pandas()
+        
+        # Apply relevance score threshold if specified
+        if min_score is not None and not results.empty and '_relevance_score' in results.columns:
+            original_count = len(results)
+            results = results[results['_relevance_score'] >= min_score]
+            filtered_count = len(results)
             
-        return search_builder.to_pandas()
+            if filtered_count < original_count:
+                print(f"[RELEVANCE FILTER] {original_count - filtered_count} results filtered out (score < {min_score})")
+        
+        # Return only top_k after filtering
+        return results.head(top_k)
 
     def search_by_image(self, image_file, top_k=5):
         image = Image.open(image_file)

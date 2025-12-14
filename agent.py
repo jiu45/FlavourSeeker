@@ -1,251 +1,393 @@
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.groq import GroqModel
-from search_engine import RecipeSearchEngine
 import os
+import re
+import lancedb
+from dotenv import load_dotenv
+from groq import Groq
 
-# --- Configuration ---
-# Set GROQ_API_KEY environment variable before running
-GROQ_API_KEY = os.environ.get(\"GROQ_API_KEY\")
+# Load environment variables
+load_dotenv()
 
-model = GroqModel('llama-3.3-70b-versatile')
+# ----- Configuration -----
+DB_PATH = "data/lancedb"
+TABLE_NAME = "recipes"
+
+# Import search engine
+from search_engine import RecipeSearchEngine
+
+# Initialize engine
 engine = RecipeSearchEngine()
 
-class RecipeSearchTools:
-    """Tools for the PydanticAI agent"""
+# Initialize Groq client
+client = Groq()  # Reads GROQ_API_KEY from environment
 
-    def __init__(self, engine: RecipeSearchEngine):
-        self.engine = engine
+# --- System Prompt for Structured Output ---
+SYSTEM_PROMPT = """You are "Culinary Compass AI", a recipe search assistant.
 
-    def search_recipes(self, ctx: RunContext, query: str, filter_str: str = None) -> str:
-        """
-        Search for recipes by text with optional filtering.
-        
-        Args:
-            query: The search keywords (e.g., "chicken", "comfort food").
-            filter_str: SQL-like where clause (e.g., "ingredients NOT LIKE '%beef%'").
-        """
-        try:
-            results = self.engine.search_by_text(query, top_k=5, where=filter_str)
-            if results.empty:
-                return "No recipes found matching your query."
+Your job is to understand user requests and output a structured search plan.
 
-            response_parts = []
-            response_parts.append(f"Here are {len(results)} recipes that match your query:\\n")
+**DATABASE SCHEMA:**
+- `title`: Recipe name
+- `ingredients`: List of ingredients (use for "no X" exclusions)
+- `instructions`: Cooking steps (use for "no frying" etc.)
+- `tags`: AI tags like Cuisine, Diet, Course
 
-            for _, row in results.iterrows():
-                response_parts.append(f"## {row['title']}")
-                
-                # Ingredients
-                ingredients = row['ingredients']
-                response_parts.append(f"**Ingredients:** {ingredients}")
-                
-                response_parts.append("---\\n")
+**OUTPUT FORMAT (ALWAYS use this exact format):**
+```
+QUERY: <search keywords>
+FILTER: <SQL filter or NONE>
+FULL: <YES or NO>
+RESPONSE: <brief explanation to user>
+```
 
-            return "\\n".join(response_parts)
+- Set FULL: YES when user asks "how to make", "recipe for", "how do I cook" (show full instructions)
+- Set FULL: NO for browsing/searching (show summary only)
 
-        except Exception as e:
-            return f"Error searching recipes: {str(e)}"
+**FILTER SYNTAX:**
+- **Include** ingredient: `ingredients LIKE '%cheese%'`
+- **Exclude** ingredient: `ingredients NOT LIKE '%cheese%'`
+- **Include** cooking method: `instructions LIKE '%bake%'`
+- **Exclude** cooking method: `instructions NOT LIKE '%fry%'`
+- **Filter by tag**: `tags LIKE '%Vegetarian%'` ✅ (Now supported!)
+- **Exclude by tag**: `tags NOT LIKE '%Meat%'`
+- **Multiple conditions**: `ingredients LIKE '%chicken%' AND tags LIKE '%Healthy%'`
+- No filter needed: `NONE`
 
-# Initialize tools
-tools_instance = RecipeSearchTools(engine)
+**RULES:**
 
-# --- Comprehensive System Prompt (8 Rules) ---
-SYSTEM_PROMPT = """You are the "Culinary Compass AI", a specialized recipe assistant.
-Your goal is to help users find recipes using the database tool.
+1. **Extract Keywords**: "I'm sad, need comfort" → QUERY: comfort food soup stew
 
-**RULES - FOLLOW EXACTLY:**
+2. **Smart Inclusions**: "I want cheese" → Just put "cheese" in QUERY (simpler and works with semantic search)
+   - But if user says "must have cheese" → FILTER: ingredients LIKE '%cheese%'
 
-1. **ALWAYS use the `search_recipes` tool**: Never invent or generate recipes manually. Only answer based on tool results.
+3. **Smart Exclusions**: "no cheese" → FILTER: ingredients NOT LIKE '%cheese%'
 
-2. **Extract Keywords**: If the user talks about feelings ("I am sad"), ignore the emotion and extract the food intent (e.g., "comfort food") to search.
+4. **Missing/Indirect Data** (nutritional concepts, metrics we don't have):
+   - **Strategy**: Combine BOTH ingredients AND dish names for comprehensive coverage
+   - **Always include disclaimer** in RESPONSE explaining the limitation
+   
+   - **Nutritional Concepts** (vitamins, minerals, macros):
+     - "Vitamin A" → QUERY: carrot sweet potato spinach pumpkin squash
+     - "High fiber" → QUERY: vegetables salad greens quinoa beans lentils whole grain oats broccoli
+     - "High protein" → QUERY: chicken beef fish tofu eggs meat legumes
+     - "Iron rich" → QUERY: spinach red meat lentils chickpeas beans
+   
+   - **Missing Metrics** (calories, time, serving size):
+     - "Low calorie" → QUERY: salad grilled vegetables steamed fish chicken broccoli greens
+     - RESPONSE: Note: We don't have calorie data. Here are dishes typically low in calories...
+     - "Quick recipes" → QUERY: quick easy stir-fry wrap sandwich chicken vegetables
+     - RESPONSE: Note: We don't have cooking times. Here are typically quick dishes...
+   
+   - **Special Diets** (when not using tag filters):
+     - "Low histamine" → QUERY: fresh chicken rice vegetables | FILTER: ingredients NOT LIKE '%tomato%' AND ingredients NOT LIKE '%fermented%'
 
-3. **Recipe Modification**: If a user asks for "Lamb Pho" but only "Beef Pho" exists:
-   - Search for "Pho".
-   - Return the closest standard recipe (Beef Pho).
-   - Explain how to modify it (e.g., "Use lamb instead of beef").
+5. **Recipe Modification**: If a user asks for a variation (e.g., "Lamb Pho", "Sugar Potatoes") but only the standard exists:
+   - Search for the closest standard dish (e.g., "Pho", "Crispy Potatoes")
+   - **CRITICAL**: In RESPONSE, matches found will be shown below. You must explicitly explain how to modify the standard recipe to match their request.
+   - Example: "Lamb Pho" → QUERY: pho | RESPONSE: We have a Beef Pho recipe. You can use this as a base and simply substitute lamb for the beef.
+   - Example: "Sugar and Pepper Potatoes" → QUERY: salt pepper potatoes | RESPONSE: We have a recipe for Salt and Pepper Potatoes. You can modify this by using sugar instead of salt to get the sweet-savory flavor you want.
 
-4. **Multiple Dishes**: If user asks for "Chicken and Cake":
-   - Call the search tool for "Chicken".
-   - Call the search tool for "Cake".
-   - Combine and present both results.
+6. **Clarification**: If too vague, set QUERY: CLARIFY and ask in RESPONSE.
 
-5. **No Independent Searching**: Do NOT combine unrelated terms (e.g., don't search "Chicken Cake").
+7. **Multiple Dishes**: "Chicken and Cake" → Make TWO separate outputs.
 
-6. **Clarification**: If query is too vague (e.g., "Tortilla"), ask 1-2 clarifying questions (e.g., "Spanish or Mexican?") before searching.
+8. **Double Negatives**: Convert to positive before filtering.
+   - "I don't want anything without cheese" = "I want cheese" → FILTER: ingredients LIKE '%cheese%'
+   - "No recipes that aren't vegan" = "Only vegan" → QUERY: vegan | FILTER: tags LIKE '%Vegan%'
 
-7. **Filtering (CRITICAL FORMAT)**:
-   - Parse constraints like "no beef", "without salt", "don't want salty" into SQL-like filters.
-   - **ONLY use this exact format**: `ingredients NOT LIKE '%[ingredient]%'`
-   - Map adjectives: "salty" → "salt", "sweet" → "sugar", "spicy" → "chili"
-   - Example: "no beef" → filter_str = "ingredients NOT LIKE '%beef%'"
-   - Example: "don't want salty" → filter_str = "ingredients NOT LIKE '%salt%'"
-   - **DO NOT use columns like sodium_content, calories, etc. - they do not exist!**
-   - **ONLY valid columns: id, title, ingredients, instructions**
+9. **Equipment/Method Filters**: Be flexible with phrasing.
+    - "No oven needed" → FILTER: instructions NOT LIKE '%bake%' AND instructions NOT LIKE '%oven%'
+    - "Slow cooker recipes" → QUERY: slow cooker crock pot | FILTER: instructions LIKE '%slow cooker%'
 
-8. **Response Style**: Be helpful, concise, and appetizing.
+10. **Knowledge/Reasoning Questions** (no search needed):
+    - If user asks about substitutions, nutrition facts, or comparisons, set QUERY: KNOWLEDGE
+    - Provide the answer directly in RESPONSE without searching
+    - Example: "Can I replace butter with margarine?" → QUERY: KNOWLEDGE | RESPONSE: Yes, you can substitute...
+    - Example: "Is salmon healthy?" → QUERY: KNOWLEDGE | RESPONSE: Salmon is rich in omega-3...
 
-**TOOL CALL FORMAT**:
-- Do NOT use XML tags like `<function=...>`.
-- Do NOT use Python code blocks.
-- Just call the tool with valid JSON arguments."""
+**EXAMPLES:**
 
-agent = Agent(
-    model,
-    tools=[tools_instance.search_recipes],
-    system_prompt=SYSTEM_PROMPT,
-    retries=1
-)
+User: "I need something with no cheese"
+```
+QUERY: recipe dinner lunch
+FILTER: ingredients NOT LIKE '%cheese%'
+RESPONSE: Here are recipes without cheese.
+```
 
-import re
-import json
+User: "spicy dinner but no beef"  
+```
+QUERY: spicy dinner
+FILTER: ingredients NOT LIKE '%beef%'
+RESPONSE: Spicy dinner options without beef.
+```
 
-# --- Ingredient Mapping for Exclusion Parsing ---
-INGREDIENT_MAPPING = {
-    'salty': 'salt',
-    'sweet': 'sugar',
-    'spicy': 'chili',
-    'fatty': 'fat',
-    'meaty': 'meat',
-    'creamy': 'cream',
-    'buttery': 'butter',
-    'oily': 'oil',
-    'cheesy': 'cheese',
-}
+User: "I don't want to fry anything"
+```
+QUERY: healthy baked steamed grilled
+FILTER: instructions NOT LIKE '%fry%'
+RESPONSE: Recipes that don't require frying.
+```
 
-def parse_user_exclusions(user_message: str) -> str:
+User: "Tortilla"
+```
+QUERY: CLARIFY
+FILTER: NONE
+RESPONSE: Do you mean Spanish tortilla (egg omelette) or Mexican tortilla (flatbread)?
+```
+
+User: "I want something with cheese"
+```
+QUERY: cheese recipe cheesy
+FILTER: NONE
+RESPONSE: Here are delicious cheesy recipes.
+```
+
+User: "must have chicken, no dairy"
+```
+QUERY: chicken
+FILTER: ingredients LIKE '%chicken%' AND ingredients NOT LIKE '%milk%' AND ingredients NOT LIKE '%cheese%' AND ingredients NOT LIKE '%cream%'
+RESPONSE: Chicken recipes without dairy products.
+```
+
+User: "vegetarian pasta"
+```
+QUERY: vegetarian pasta
+FILTER: tags LIKE '%Vegetarian%'
+FULL: NO
+RESPONSE: Vegetarian pasta dishes.
+```
+
+User: "How do I make mac and cheese?"
+```
+QUERY: mac and cheese
+FILTER: NONE
+FULL: YES
+RESPONSE: Here's how to make mac and cheese:
+```
+
+User: "recipe for chicken soup"
+```
+QUERY: chicken soup
+FILTER: NONE
+FULL: YES
+RESPONSE: Here's a delicious chicken soup recipe:
+```
+
+IMPORTANT: Always output the structured format. Never output code or function calls.
+"""
+
+
+def parse_agent_output(output: str) -> dict:
     """
-    Parse user message for exclusion patterns and build valid LanceDB filter.
-    
-    Patterns matched:
-    - "no [X]", "without [X]", "don't want [X]", "exclude [X]"
-    - Maps adjectives like "salty" -> "salt"
+    Parse the structured output from the LLM.
     
     Returns:
-        A valid filter string like "ingredients NOT LIKE '%salt%'" or None.
+        dict with 'query', 'filter', 'full', 'response' keys
     """
-    text_lower = user_message.lower()
-    exclusions = []
+    result = {
+        'query': None,
+        'filter': None,
+        'full': False,
+        'response': None,
+        'raw': output
+    }
     
-    # Pattern: "no [X]", "without [X]", "don't want [something] [X]", "exclude [X]"
-    # Examples: "no beef", "without salt", "don't want something salty", "exclude cheese"
-    patterns = [
-        r"(?:no|without|exclude)\s+(?:something\s+)?(\w+)",
-        r"don'?t\s+want\s+(?:something\s+)?(\w+)",
-        r"i\s+don'?t\s+like\s+(\w+)",
-    ]
+    # Extract QUERY
+    query_match = re.search(r'QUERY:\s*(.+?)(?:\n|$)', output, re.IGNORECASE)
+    if query_match:
+        result['query'] = query_match.group(1).strip()
     
-    for pattern in patterns:
-        matches = re.findall(pattern, text_lower)
-        for match in matches:
-            # Skip common stop words that aren't ingredients
-            if match in ['the', 'a', 'an', 'any', 'it', 'that', 'this', 'meal', 'dish', 'food', 'recipe']:
-                continue
-            # Map adjectives to ingredients
-            ingredient = INGREDIENT_MAPPING.get(match, match)
-            if ingredient not in exclusions:
-                exclusions.append(ingredient)
+    # Extract FILTER
+    filter_match = re.search(r'FILTER:\s*(.+?)(?:\n|$)', output, re.IGNORECASE)
+    if filter_match:
+        filter_val = filter_match.group(1).strip()
+        if filter_val.upper() != 'NONE':
+            result['filter'] = filter_val
     
-    if not exclusions:
-        return None
+    # Extract FULL
+    full_match = re.search(r'FULL:\s*(.+?)(?:\n|$)', output, re.IGNORECASE)
+    if full_match:
+        result['full'] = full_match.group(1).strip().upper() == 'YES'
     
-    # Build filter string
-    filters = [f"ingredients NOT LIKE '%{exc}%'" for exc in exclusions]
-    return " AND ".join(filters)
+    # Extract RESPONSE
+    response_match = re.search(r'RESPONSE:\s*(.+?)(?:\n```|$)', output, re.IGNORECASE | re.DOTALL)
+    if response_match:
+        result['response'] = response_match.group(1).strip()
+    
+    return result
 
-def chat_with_agent(user_message: str, history: list):
+
+def convert_tag_filters(filter_str: str) -> str:
     """
-    Wrapper to run the agent.
+    Convert tag LIKE filters to array operations.
     
-    WORKAROUND: Llama-3.3 on Groq often returns invalid XML/Pseudo-code 
-    instead of real tool calls (e.g., `<function=...>`).
+    Example: tags LIKE '%Vegetarian%' → array_has_any(tags, ['Vegetarian'])
+    """
+    if not filter_str:
+        return filter_str
     
-    This wrapper intercepts those strings, parses them, executes the tool manualy,
-    and returns the result, effectively fixing the model's behavior transparently.
+    def replace_tag_like(match):
+        is_not = match.group(1)
+        value = match.group(2)
+        array_expr = f"array_has_any(tags, ['{value}'])"
+        if is_not:
+            return f"NOT {array_expr}"
+        return array_expr
+    
+    # Match: tags LIKE '%Value%' or tags NOT LIKE '%Value%'
+    converted = re.sub(
+        r"tags\s+(NOT\s+)?LIKE\s+'%(\w+)%'",
+        replace_tag_like,
+        filter_str,
+        flags=re.IGNORECASE
+    )
+    
+    return converted
+
+
+def search_with_filter(query: str, filter_str: str = None, show_full: bool = False) -> str:
+    """
+    Execute search with validated filter.
+    
+    Args:
+        query: Search keywords
+        filter_str: SQL filter
+        show_full: If True, show full recipe with instructions (for "how to" questions)
     """
     try:
-        # PydanticAI run_sync
-        result = agent.run_sync(user_message)
-        output = result.output
+        # Convert tag filters to array operations
+        if filter_str:
+            filter_str = convert_tag_filters(filter_str)
         
-        # --- Interceptor Logic ---
-        # Detects: <function=search_recipes...> or {function=search_recipes}...
-        if "function=search_recipes" in output or "search_recipes(" in output:
-            print(f"Intercepted Invalid Tool Call: {output}")
-            
-            # 1. Extract Query
-            # Look for "query": "something" OR query="something"
-            query_match = re.search(r'query"?\s*[:=]\s*["\'](.*?)["\']', output, re.IGNORECASE)
-            
-            # 2. Extract Filter
-            # Look for "filter_str": "something" OR filter_str="something"
-            filter_match = re.search(r'filter_str"?\s*[:=]\s*["\'](.*?)["\']', output, re.IGNORECASE)
-            
-            if query_match:
-                query_val = query_match.group(1)
-                filter_val = filter_match.group(1) if filter_match else None
-                
-                # Validate Filter - Only allow known columns
-                VALID_FILTER_COLUMNS = ['id', 'title', 'ingredients', 'instructions', 'image_name', 'search_text']
-                if filter_val:
-                    has_valid_column = any(col in filter_val.lower() for col in VALID_FILTER_COLUMNS)
-                    if not has_valid_column:
-                        print(f"Invalid LLM filter '{filter_val}' - using client-side parser.")
-                        # FALLBACK: Parse original user message for exclusions
-                        filter_val = parse_user_exclusions(user_message)
-                
-                # If still no filter, try parsing user message anyway
-                if not filter_val:
-                    filter_val = parse_user_exclusions(user_message)
-                
-                print(f"Manual Execution -> Query: {query_val}, Filter: {filter_val}")
-                
-                # Manual Tool Execution
-                tool_result = tools_instance.search_recipes(None, query_val, filter_val)
-                return tool_result
+        # Validate filter before use
+        if filter_str:
+            # Check for obviously broken filters
+            if "LIKE" in filter_str.upper() and "'%"not in filter_str:
+                print(f"[WARN] Malformed filter: {filter_str}")
+                filter_str = None
         
-        # Return normal output if no interception needed
-        return output
-
+        # Use relevance score threshold to filter out irrelevant results
+        # Based on testing with 8 recipes:
+        #   0.030+: Excellent match (direct query like "mac and cheese" → Mac and Cheese)
+        #   0.016-0.020: Weak match (generic queries return all recipes with similar scores)
+        #   <0.015: Poor match
+        # Setting to 0.025 means: Only show excellent/direct matches, filter weak ones
+        min_score = 0.025  # Strict: Only excellent matches
+        
+        results = engine.search_by_text(
+            query, 
+            top_k=5 if not show_full else 1, 
+            where=filter_str,
+            min_score=min_score
+        )
+        
+        if results.empty:
+            return "No recipes found matching your criteria. Try different keywords or remove some filters."
+        
+        response_parts = []
+        for _, row in results.iterrows():
+            response_parts.append(f"## {row['title']}")
+            
+            if 'visual_description' in row and row['visual_description']:
+                response_parts.append(f"_{row['visual_description']}_")
+            
+            response_parts.append(f"\n**Ingredients:**\n{row['ingredients']}")
+            
+            # Show full instructions if requested
+            if show_full and 'instructions' in row:
+                response_parts.append(f"\n**Instructions:**\n{row['instructions']}")
+            
+            response_parts.append("\n---")
+        
+        return "\n".join(response_parts)
+    
     except Exception as e:
-        error_str = str(e)
+        print(f"[ERROR] Search failed: {e}")
+        # Retry without filter
+        if filter_str:
+            return search_with_filter(query, None, show_full) + "\n\n(Note: Filter was invalid, showing unfiltered results)"
+        return f"Search error: {str(e)}"
+
+
+def chat_with_agent(user_message: str, history: list = None) -> str:
+    """
+    Main chat interface for the agent.
+    
+    Args:
+        user_message: User's query
+        history: Chat history (optional, for context)
+    
+    Returns:
+        Agent's response
+    """
+    if history is None:
+        history = []
+    
+    # Build messages
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Add history
+    for h in history:
+        messages.append({"role": "user", "content": h['user']})
+        messages.append({"role": "assistant", "content": h['assistant']})
+    
+    # Add current message
+    messages.append({"role": "user", "content": user_message})
+    
+    try:
+        # Call LLM
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=messages,
+            max_tokens=500,
+            temperature=0.3
+        )
         
-        # --- Fallback: Parse the error message itself ---
-        # If PydanticAI throws a 400 error, the failed_generation is in the message.
-        # e.g., "body: {'error': {..., 'failed_generation': '<function=search_recipes,{"query": "..."}>'...}}"
+        llm_output = response.choices[0].message.content.strip()
+        print(f"[LLM Output]\n```\n{llm_output}\n```\n")
         
-        if "failed_generation" in error_str or "function=search_recipes" in error_str:
-            print(f"Caught 400 Error, Attempting Recovery: {error_str[:200]}...")
-            
-            # 1. Extract Query from error message
-            query_match = re.search(r'query"?\s*[:=]\s*["\'](.*?)["\']', error_str, re.IGNORECASE)
-            
-            # 2. Extract Filter (optional)
-            filter_match = re.search(r'filter_str"?\s*[:=]\s*["\'](.*?)["\']', error_str, re.IGNORECASE)
-            
-            if query_match:
-                query_val = query_match.group(1)
-                filter_val = filter_match.group(1) if filter_match else None
-                
-                # 3. Validate Filter - Only allow known columns
-                # LanceDB schema: id, title, ingredients, instructions, image_name, search_text
-                VALID_FILTER_COLUMNS = ['id', 'title', 'ingredients', 'instructions', 'image_name', 'search_text']
-                if filter_val:
-                    # Check if ANY valid column is mentioned in the filter
-                    has_valid_column = any(col in filter_val.lower() for col in VALID_FILTER_COLUMNS)
-                    if not has_valid_column:
-                        print(f"Invalid LLM filter '{filter_val}' - using client-side parser.")
-                        # FALLBACK: Parse original user message for exclusions
-                        filter_val = parse_user_exclusions(user_message)
-                
-                # If still no filter, try parsing user message anyway
-                if not filter_val:
-                    filter_val = parse_user_exclusions(user_message)
-                
-                print(f"Recovery Execution -> Query: {query_val}, Filter: {filter_val}")
-                
-                # Manual Tool Execution
-                tool_result = tools_instance.search_recipes(None, query_val, filter_val)
-                return tool_result
+        # Parse output
+        parsed = parse_agent_output(llm_output)
+        print(f"[Parsed] Query: {parsed['query']}, Filter: {parsed['filter']}, Full: {parsed['full']}")
         
-        # If we couldn't parse it, return a helpful error
-        return f"Agent Error: {error_str}"
+        # Handle clarification
+        if parsed['query'] and parsed['query'].upper() == 'CLARIFY':
+            return parsed['response'] or "Could you please be more specific about what you're looking for?"
+        
+        # Handle knowledge/reasoning questions (no search needed)
+        if parsed['query'] and parsed['query'].upper() == 'KNOWLEDGE':
+            return parsed['response'] or "I can help with that question."
+            
+        # Execute search if we have a query
+        if parsed['query']:
+            search_results = search_with_filter(parsed['query'], parsed['filter'], parsed['full'])
+            
+            # Combine agent response with search results
+            if parsed['response']:
+                return f"{parsed['response']}\n\n{search_results}"
+            return search_results
+        
+        # Fallback if no query
+        return parsed['response'] or "I couldn't understand your request. Could you rephrase?"
+        
+    except Exception as e:
+        return f"Error: {str(e)}"
+
+
+if __name__ == "__main__":
+    # Interactive test
+    print("Culinary Compass AI - Recipe Search Agent")
+    print("=" * 50)
+    print("Try queries like:")
+    print("  - 'I want something with chicken but no dairy'")
+    print("  - 'vegetarian pasta'")
+    print("  - 'How do I make mac and cheese?'")
+    print("=" * 50)
+    
+    while True:
+        user_input = input("\nYou: ").strip()
+        if user_input.lower() in ['quit', 'exit', 'bye']:
+            print("Goodbye!")
+            break
+        
+        response = chat_with_agent(user_input)
+        print(f"\nAgent: {response}")

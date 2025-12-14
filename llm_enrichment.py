@@ -13,12 +13,10 @@ import json
 import base64
 import time
 from groq import Groq
-
-
 from dotenv import load_dotenv
 
 load_dotenv()
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
+
 # --- Configuration ---
 MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"  # Replaces deprecated Llama 3.2 Vision
 IMAGES_DIR = "Food Images"
@@ -179,7 +177,7 @@ def batch_enrich_recipes(recipes: list[dict], images_dir: str = IMAGES_DIR) -> l
     Returns:
         List of enriched recipe dicts with 'visual_description' and 'tags' added
     """
-    client = Groq(api_key=GROQ_API_KEY)
+    client = Groq()
     enriched_recipes = []
     total = len(recipes)
     
