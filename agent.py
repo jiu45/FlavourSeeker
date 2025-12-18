@@ -104,6 +104,31 @@ RESPONSE: <brief explanation to user>
     - Example: "Can I replace butter with margarine?" → QUERY: KNOWLEDGE | RESPONSE: Yes, you can substitute...
     - Example: "Is salmon healthy?" → QUERY: KNOWLEDGE | RESPONSE: Salmon is rich in omega-3...
 
+## IMAGE HANDLING RULES (when user uploads a food image)
+
+11. **Image-Aware Search**: When IMAGE_CONTEXT is provided:
+    - Use QUERY: IMAGE_SEARCH to trigger hybrid visual+semantic search
+    - If user provides text modification (e.g., "make it vegan"), add it: QUERY: IMAGE_SEARCH | vegan version
+    - In RESPONSE, explain what you identified from the image and what you're searching for
+
+12. **Ambiguous Image Detection**: If IMAGE_CONTEXT shows uncertainty or multiple possibilities:
+    - Set QUERY: CLARIFY
+    - Ask user to disambiguate between the possibilities
+    - Example: IMAGE_CONTEXT says "Could be Khao Soi or Yellow Curry"
+    - RESPONSE: "This looks like a delicious curry! Is it Khao Soi (with crispy noodles) or a classic Yellow Curry?"
+
+13. **Composed Queries** (Image + Text Modification):
+    - User uploads chocolate cake + says "make it strawberry"
+    - QUERY: IMAGE_SEARCH | strawberry cake
+    - RESPONSE: Explain you're searching for the modified version
+    - If not found: Provide recipe modification guidance (like Recipe Modification Rule 5)
+
+14. **Questions About Uploaded Image**:
+    - User uploads image + asks "Is this healthy?" or "What's in this?"
+    - First try: QUERY: IMAGE_SEARCH to find the recipe
+    - If found: Answer based on recipe data
+    - If not found: Use QUERY: KNOWLEDGE to answer from general knowledge about the identified dish
+
 **EXAMPLES:**
 
 User: "I need something with no cheese"
@@ -308,13 +333,45 @@ def search_with_filter(query: str, filter_str: str = None, show_full: bool = Fal
         return f"Search error: {str(e)}"
 
 
-def chat_with_agent(user_message: str, history: list = None) -> str:
+def format_results(results_df, show_full: bool = False) -> str:
+    """
+    Format search results DataFrame into a readable string.
+    
+    Args:
+        results_df: pandas DataFrame with search results
+        show_full: If True, include full instructions
+        
+    Returns:
+        Formatted string with recipe details
+    """
+    if results_df.empty:
+        return "No recipes found matching your criteria."
+    
+    response_parts = []
+    for _, row in results_df.iterrows():
+        response_parts.append(f"## {row['title']}")
+        
+        if 'visual_description' in row and row['visual_description']:
+            response_parts.append(f"_{row['visual_description']}_")
+        
+        response_parts.append(f"\n**Ingredients:**\n{row['ingredients']}")
+        
+        if show_full and 'instructions' in row:
+            response_parts.append(f"\n**Instructions:**\n{row['instructions']}")
+        
+        response_parts.append("\n---")
+    
+    return "\n".join(response_parts)
+
+
+def chat_with_agent(user_message: str, history: list = None, image_file = None) -> str:
     """
     Main chat interface for the agent.
     
     Args:
         user_message: User's query
         history: Chat history (optional, for context)
+        image_file: Optional uploaded image file for image-aware search
     
     Returns:
         Agent's response
@@ -325,13 +382,34 @@ def chat_with_agent(user_message: str, history: list = None) -> str:
     # Build messages
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     
-    # Add history
-    for h in history:
-        messages.append({"role": "user", "content": h['user']})
-        messages.append({"role": "assistant", "content": h['assistant']})
+    # Add history (handle Streamlit's format: {'role': 'user'/'assistant', 'content': '...'})
+    # Exclude the last message if it's the current user message (to avoid duplicates)
+    history_to_add = history[:-1] if history else []
+    for h in history_to_add:
+        if 'role' in h and 'content' in h:
+            messages.append({"role": h['role'], "content": h['content']})
+    
+    # Generate image context if image is provided
+    image_context = None
+    if image_file:
+        try:
+            print("[AGENT] Generating image context...")
+            image_context = engine._caption_image_groq(image_file)
+            # Reset file pointer for later use
+            if hasattr(image_file, 'seek'):
+                image_file.seek(0)
+        except Exception as e:
+            print(f"[WARN] Failed to get image context: {e}")
+            image_context = "Unable to analyze image"
+    
+    # Build user message with image context
+    if image_context:
+        enhanced_message = f"IMAGE_CONTEXT: {image_context}\n\nUser Query: {user_message}"
+    else:
+        enhanced_message = user_message
     
     # Add current message
-    messages.append({"role": "user", "content": user_message})
+    messages.append({"role": "user", "content": enhanced_message})
     
     try:
         # Call LLM
@@ -356,8 +434,32 @@ def chat_with_agent(user_message: str, history: list = None) -> str:
         # Handle knowledge/reasoning questions (no search needed)
         if parsed['query'] and parsed['query'].upper() == 'KNOWLEDGE':
             return parsed['response'] or "I can help with that question."
+        
+        # Handle IMAGE_SEARCH - use hybrid image search
+        if parsed['query'] and parsed['query'].upper().startswith('IMAGE_SEARCH'):
+            if image_file:
+                print("[AGENT] Executing hybrid image search...")
+                # Check for text modification (e.g., "IMAGE_SEARCH | strawberry cake")
+                query_parts = parsed['query'].split('|')
+                text_modification = query_parts[1].strip() if len(query_parts) > 1 else None
+                
+                if text_modification:
+                    # Composed query: search by modified text
+                    print(f"[AGENT] Composed query with modification: {text_modification}")
+                    search_results = search_with_filter(text_modification, parsed['filter'], parsed['full'])
+                else:
+                    # Pure image search
+                    image_file.seek(0) if hasattr(image_file, 'seek') else None
+                    results_df = engine.search_by_image_hybrid(image_file, top_k=5)
+                    search_results = format_results(results_df, parsed['full'])
+                
+                if parsed['response']:
+                    return f"{parsed['response']}\n\n{search_results}"
+                return search_results
+            else:
+                return "I need an image to search. Please upload a food photo first."
             
-        # Execute search if we have a query
+        # Execute text search if we have a query
         if parsed['query']:
             search_results = search_with_filter(parsed['query'], parsed['filter'], parsed['full'])
             

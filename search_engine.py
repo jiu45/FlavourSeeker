@@ -5,6 +5,12 @@ from PIL import Image
 import torch
 import ast
 import pandas as pd
+import base64
+import os
+from groq import Groq
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- Configuration ---
 DB_PATH = "data/lancedb"
@@ -69,6 +75,120 @@ class RecipeSearchEngine:
             .limit(top_k) \
             .to_pandas()
         return results
+    
+    def _caption_image_groq(self, image_file):
+        """
+        Generate a recipe caption from an image using Groq Vision API.
+        
+        Returns:
+            str: Caption describing the dish and ingredients
+        """
+        try:
+            # Initialize Groq client
+            client = Groq()
+            
+            # Encode image to base64
+            image = Image.open(image_file)
+            # Save to bytes
+            import io
+            buffer = io.BytesIO()
+            image.save(buffer, format="JPEG")
+            image_bytes = buffer.getvalue()
+            base64_image = base64.b64encode(image_bytes).decode('utf-8')
+            
+            # Call Groq Vision API
+            response = client.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Analyze this food image. Identify the dish name and key ingredients. Be specific and concise. Format: 'Dish Name: [name]. Ingredients: [list]'"
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }],
+                max_tokens=150,
+                temperature=0.3
+            )
+            
+            caption = response.choices[0].message.content.strip()
+            print(f"[IMAGE CAPTION] {caption}")
+            return caption
+            
+        except Exception as e:
+            print(f"[WARNING] Image captioning failed: {e}")
+            return "food dish"  # Fallback
+    
+    def _reciprocal_rank_fusion(self, results_list, k=60):
+        """
+        Merge multiple ranked result lists using Reciprocal Rank Fusion.
+        
+        Args:
+            results_list: List of pandas DataFrames (ranked results)
+            k: RRF constant (default 60 is standard)
+            
+        Returns:
+            pandas DataFrame with fused results, sorted by RRF score
+        """
+        # Dictionary to accumulate RRF scores
+        scores = {}
+        
+        for results_df in results_list:
+            for rank, (idx, row) in enumerate(results_df.iterrows(), start=1):
+                recipe_id = row['title']  # Use title as unique identifier
+                rrf_score = 1.0 / (k + rank)
+                
+                if recipe_id not in scores:
+                    scores[recipe_id] = {'score': 0, 'row': row}
+                scores[recipe_id]['score'] += rrf_score
+        
+        # Convert back to DataFrame
+        fused_rows = [
+            {**data['row'].to_dict(), '_rrf_score': data['score']}
+            for recipe_id, data in sorted(scores.items(), key=lambda x: x[1]['score'], reverse=True)
+        ]
+        
+        return pd.DataFrame(fused_rows)
+    
+    def search_by_image_hybrid(self, image_file, top_k=5):
+        """
+        Hybrid image search: Combines CLIP visual similarity with LLM semantic understanding.
+        
+        Path A: CLIP visual search
+        Path B: LLM caption → text search
+        Fusion: Reciprocal Rank Fusion (RRF)
+        
+        Args:
+            image_file: Path to uploaded image
+            top_k: Number of final results to return
+            
+        Returns:
+            pandas DataFrame with fused results
+        """
+        print("[HYBRID SEARCH] Starting dual-path search...")
+        
+        # Path A: CLIP visual search
+        print("  [Path A] CLIP visual similarity...")
+        visual_results = self.search_by_image(image_file, top_k=10)
+        
+        # Path B: LLM caption → text search
+        print("  [Path B] LLM semantic captioning...")
+        caption = self._caption_image_groq(image_file)
+        text_results = self.search_by_text(caption, top_k=10)
+        
+        # Fusion: RRF
+        print("  [Fusion] Merging results with RRF...")
+        fused_results = self._reciprocal_rank_fusion([visual_results, text_results])
+        
+        print(f"[HYBRID SEARCH] Complete. Returning top {top_k} results.")
+        return fused_results.head(top_k)
 
     def search_by_ingredients(self, ingredients_list, top_k=5, strict=False):
         """

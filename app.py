@@ -103,9 +103,10 @@ if 'active_recipe' not in st.session_state: # Only show search if not chatting
         uploaded_file = st.file_uploader("Upload a food photo", type=["jpg", "png", "jpeg"])
         if uploaded_file:
             st.image(uploaded_file, caption="Uploaded Image", width=300)
-            with st.spinner("Analyzing image..."):
-                results = engine.search_by_image(uploaded_file)
-            st.subheader("Visually Similar Recipes")
+            with st.spinner("Analyzing image with AI (visual + semantic)..."):
+                # Use hybrid search: CLIP + LLM captioning
+                results = engine.search_by_image_hybrid(uploaded_file)
+            st.subheader("Best Matching Recipes")
             display_results(results)
 
     elif search_mode == "What's in my Fridge?":
@@ -167,15 +168,31 @@ if 'active_recipe' not in st.session_state: # Only show search if not chatting
 
     elif search_mode == "AI Smart Search 🤖":
         st.header("Culinary Compass AI 🤖")
-        st.markdown("*Ask me anything! I can find recipes, plan meals, or handle complex constraints like 'no beef'.*")
+        st.markdown("*Ask me anything! Upload a food photo, find recipes, or handle complex constraints.*")
 
         if "agent_history" not in st.session_state:
             st.session_state.agent_history = []
+        if "agent_image" not in st.session_state:
+            st.session_state.agent_image = None
 
-        # Display history
-        for msg in st.session_state.agent_history:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
+        # Image upload section
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            uploaded_image = st.file_uploader("📸 Upload food image", type=["jpg", "png", "jpeg"], key="agent_img_uploader")
+            if uploaded_image:
+                st.session_state.agent_image = uploaded_image
+                st.image(uploaded_image, caption="Uploaded", width=150)
+            elif st.session_state.agent_image:
+                st.image(st.session_state.agent_image, caption="Current image", width=150)
+                if st.button("Clear image"):
+                    st.session_state.agent_image = None
+                    st.rerun()
+        
+        with col2:
+            # Display history
+            for msg in st.session_state.agent_history:
+                with st.chat_message(msg["role"]):
+                    st.markdown(msg["content"])
 
         # Input
         if prompt := st.chat_input("How can I help you today?"):
@@ -185,13 +202,18 @@ if 'active_recipe' not in st.session_state: # Only show search if not chatting
 
             with st.spinner("Thinking..."):
                 try:
-                    # Import here to avoid circular dependencies if any
                     from agent import chat_with_agent
                     
-                    response_text = chat_with_agent(prompt, st.session_state.agent_history)
+                    # Pass image if available
+                    response_text = chat_with_agent(
+                        prompt, 
+                        st.session_state.agent_history,
+                        image_file=st.session_state.agent_image
+                    )
                     
                     st.session_state.agent_history.append({"role": "assistant", "content": response_text})
                     with st.chat_message("assistant"):
                         st.markdown(response_text)
                 except Exception as e:
                     st.error(f"Agent Error: {e}")
+
