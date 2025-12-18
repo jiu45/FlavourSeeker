@@ -1,7 +1,5 @@
 import lancedb
-from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-import pandas as pd
 
 load_dotenv()
 
@@ -9,71 +7,61 @@ load_dotenv()
 DB_PATH = "data/lancedb"
 TABLE_NAME = "recipes"
 
-def update_embeddings_with_enrichment():
+def update_search_text_with_enrichment():
     """
-    Re-generate text embeddings after enrichment (tags + visual_description).
+    Update search_text to include tags and visual_description.
+    
+    LanceDB will automatically re-embed the updated search_text into text_vector
+    thanks to the embedding registry defined in ingest.py.
     
     This script assumes you already have 'tags' and 'visual_description' fields
-    populated in your database, but the text_vector embeddings don't include them yet.
-    
-    Steps:
-    1. Load all recipes from database
-    2. Rebuild search_text with tags + visual_description
-    3. Generate new text embeddings with MiniLM
-    4. Update database with new text_vector
+    populated in your database.
     """
     print("="*60)
-    print("Updating Text Embeddings with Enrichment Data")
+    print("Updating search_text with Enrichment Data")
     print("="*60)
     
     # Connect to database
     db = lancedb.connect(DB_PATH)
     tbl = db.open_table(TABLE_NAME)
     
-    # Load all recipes
-    df = tbl.to_pandas()
-    print(f"\n[1/4] Loaded {len(df)} recipes from database")
+    print(f"\n[1/2] Processing {tbl.count_rows()} recipes...")
     
-    # Initialize embedding model
-    print("[2/4] Loading MiniLM embedding model...")
-    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
-    
-    # Rebuild search_text with enrichment
-    print("[3/4] Rebuilding search_text with tags + visual_description...")
     updated_count = 0
     
-    for idx, row in df.iterrows():
-        # Get tags as string
-        tags = row.get('tags', [])
-        tags_str = " ".join(tags) if isinstance(tags, list) else ""
+    # Iterate through all recipes
+    for recipe in tbl.to_pandas().itertuples():
+        try:
+            # Get tags as string
+            tags = recipe.tags if hasattr(recipe, 'tags') else []
+            tags_str = " ".join(tags) if isinstance(tags, list) else ""
+            
+            # Get visual description
+            visual_desc = recipe.visual_description if hasattr(recipe, 'visual_description') else ""
+            
+            # Only update if we have enrichment data
+            if visual_desc or tags_str:
+                # Rebuild search_text
+                new_search_text = f"{recipe.title} {recipe.ingredients} {recipe.instructions} {visual_desc} {tags_str}"
+                
+                # Update the record
+                tbl.update(
+                    where=f"id = {recipe.id}",
+                    values={"search_text": new_search_text}
+                )
+                
+                updated_count += 1
+                
+                if updated_count % 10 == 0:
+                    print(f"  Updated {updated_count} recipes...")
         
-        # Get visual description
-        visual_desc = row.get('visual_description', '')
-        
-        # Rebuild search_text
-        new_search_text = f"{row['title']} {row['ingredients']} {row.get('instructions', '')} {visual_desc} {tags_str}"
-        df.at[idx, 'search_text'] = new_search_text
-        
-        if visual_desc or tags_str:
-            updated_count += 1
+        except Exception as e:
+            print(f"  [WARN] Failed to update recipe {recipe.id}: {e}")
     
-    print(f"  → Updated search_text for {updated_count} enriched recipes")
-    
-    # Generate new embeddings
-    print("[4/4] Generating new text embeddings...")
-    text_embeddings = model.encode(df['search_text'].tolist(), show_progress_bar=True)
-    df['text_vector'] = text_embeddings.tolist()
-    
-    # Update database
-    print("\n[DB] Updating database with new embeddings...")
-    
-    # Drop old table and create new one with updated embeddings
-    db.drop_table(TABLE_NAME)
-    db.create_table(TABLE_NAME, df)
-    
-    print(f"[DONE] Successfully updated {len(df)} recipes with new embeddings!")
+    print(f"\n[2/2] Updated {updated_count} recipes with enrichment data")
+    print(f"\n[DONE] LanceDB will auto-embed the updated search_text!")
     print(f"       Tags and visual descriptions are now searchable.")
     print("="*60)
 
 if __name__ == "__main__":
-    update_embeddings_with_enrichment()
+    update_search_text_with_enrichment()

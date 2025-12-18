@@ -21,3 +21,6 @@ Food Images/
 # System
 Thumbs.db
 Desktop.ini
+
+#Batch file
+run_app.bat
