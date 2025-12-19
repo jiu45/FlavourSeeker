@@ -11,8 +11,6 @@ env/
 # Data
 data/
 lancedb/
-*.csv
-Food Images/
 
 # IDE
 .vscode/
