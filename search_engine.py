@@ -16,61 +16,48 @@ load_dotenv()
 DB_PATH = "data/lancedb"
 TABLE_NAME = "recipes"
 
-class RecipeSearchEngine:
+class RecipeSearchEngine:    
     def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+
         self.db = lancedb.connect(DB_PATH)
         self.table = self.db.open_table(TABLE_NAME)
-        
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        
-        # Initialize embedding registry for hybrid search
-        # This is needed for LanceDB to vectorize text queries automatically
-        from lancedb.embeddings import get_registry
-        self.embedding_func = get_registry().get("sentence-transformers").create(
-            name="all-MiniLM-L6-v2", 
+
+        self.text_model = SentenceTransformer(
+            "all-MiniLM-L6-v2",
             device=self.device
         )
-        
-        # CLIP model for image search
-        self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
-        self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+
+        self.clip_model = CLIPModel.from_pretrained(
+            "openai/clip-vit-base-patch32"
+        ).to(self.device)
+
+        self.clip_processor = CLIPProcessor.from_pretrained(
+            "openai/clip-vit-base-patch32"
+        )
+
 
     def search_by_text(self, query, top_k=5, where=None, min_score=None):
-        """
-        Hybrid Search: FTS + Vector with optional relevance filtering.
-        
-        Args:
-            query: Search query string
-            top_k: Maximum number of results to return
-            where: SQL-like filter condition
-            min_score: Minimum relevance score. Results with _relevance_score < this will be discarded.
-                      For hybrid search, typical values: -5 (strict), -10 (moderate), -15 (loose)
-                      Note: Scores are negative in LanceDB hybrid search (less negative = more relevant)
-        
-        Returns:
-            pandas DataFrame with search results
-        """
-        # Fetch more results initially to account for score filtering
+        query_vector = self.text_model.encode(query).tolist()
+
         fetch_limit = top_k * 3 if min_score else top_k
-        
-        search_builder = self.table.search(query, query_type="hybrid", vector_column_name="text_vector").limit(fetch_limit)
-        
+
+        search_builder = (
+            self.table
+            .search(query_vector, vector_column_name="text_vector")
+            .limit(fetch_limit)
+        )
+
         if where:
             search_builder = search_builder.where(where)
-        
+
         results = search_builder.to_pandas()
-        
-        # Apply relevance score threshold if specified
-        if min_score is not None and not results.empty and '_relevance_score' in results.columns:
-            original_count = len(results)
+
+        if min_score is not None and '_relevance_score' in results.columns:
             results = results[results['_relevance_score'] >= min_score]
-            filtered_count = len(results)
-            
-            if filtered_count < original_count:
-                print(f"[RELEVANCE FILTER] {original_count - filtered_count} results filtered out (score < {min_score})")
-        
-        # Return only top_k after filtering
+
         return results.head(top_k)
+
 
     def search_by_image(self, image_file, top_k=5):
         image = Image.open(image_file)
