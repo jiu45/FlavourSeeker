@@ -10,7 +10,7 @@ import shutil
 from typing import List
 
 # --- Configuration ---
-DATA_PATH = "Food Ingredients and Recipe Dataset with Image Name Mapping.csv"
+DATA_PATH = "Food Ingredients and Recipe Dataset with Image Name Mapping Final.csv"
 IMAGES_DIR = "Food Images"
 DB_PATH = "data/lancedb"
 TABLE_NAME = "recipes"
@@ -68,7 +68,7 @@ def process_data():
         shutil.rmtree(DB_PATH) 
 
     print("Loading data...")
-    df = pd.read_csv(DATA_PATH)
+    df = pd.read_csv(DATA_PATH, encoding='utf-8')
     
     # Cleaning
     initial_len = len(df)
