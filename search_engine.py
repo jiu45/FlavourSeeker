@@ -22,7 +22,16 @@ class RecipeSearchEngine:
         self.table = self.db.open_table(TABLE_NAME)
         
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        # clip_model is still needed for image search since we don't use registry for it yet
+        
+        # Initialize embedding registry for hybrid search
+        # This is needed for LanceDB to vectorize text queries automatically
+        from lancedb.embeddings import get_registry
+        self.embedding_func = get_registry().get("sentence-transformers").create(
+            name="all-MiniLM-L6-v2", 
+            device=self.device
+        )
+        
+        # CLIP model for image search
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
         self.clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
